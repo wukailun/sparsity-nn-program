@@ -1,0 +1,6 @@
+*.plist
+*.DS_Store
+*.out
+*.iml
+*.xml
+*.name
