@@ -3,14 +3,16 @@ from lstm import *
 from gru import *
 from basic import *
 from softmax import *
+from brnn import *
 import h5py
 import sys
+import math
 sys.path.append('..')
 from optimizers.optimizers import *
 
 
 class RNN(object):
-    def __init__(self, n_words, in_size, out_size, hidden_size,
+    def __init__(self, n_words, in_size, out_size, hidden_size,hidden_neg_size,
                  cell='lstm', optimizer='adam', p=0.5):
         """
         :type n_words: int
@@ -28,7 +30,7 @@ class RNN(object):
                             of the stacked RNNs
 
         :type cell: str
-        :param cell: 'LSTM' or 'GRU'
+        :param cell: 'BRNN','LSTM' or 'GRU'
 
         :type: optimizer: str
         :param optimizer: the optimizers
@@ -42,6 +44,7 @@ class RNN(object):
         self.in_size = in_size
         self.out_size = out_size
         self.hidden_size = hidden_size
+        self.hidden_neg_size = hidden_neg_size
         self.cell = cell
         self.drop_rate = p
         self.use_noise = T.iscalar('use_noise')  # whether dropout is random
@@ -54,6 +57,9 @@ class RNN(object):
         self.epsilon = 1.0e-15  # for clipping in prediction step
         self.define_layers()
         self.train_test_funcs()
+
+
+
 
     def define_layers(self):
 
@@ -81,6 +87,13 @@ class RNN(object):
             elif self.cell == 'lstm':
                 hidden_layer = LSTMLayer(rng, str(i + 1), shape, layer_input, self.maskX,
                                          self.use_noise, self.drop_rate)
+            elif self.cell == 'brnn':
+                if i == 0:
+                    shape = (self.in_size, self.hidden_size[0], self.hidden_neg_size)
+                else:
+                    shape = (self.hidden_size[i - 1], self.hidden_size[i], self.hidden_neg_size)
+                hidden_layer = FeedbackLayer(rng, str(i + 1),shape,layer_input, self.maskX,
+                                             self.use_noise,self.drop_rate)
             else:
                 hidden_layer = BasicLayer(rng, str(i + 1), shape, layer_input, self.maskX,
                                           self.use_noise, self.drop_rate)
@@ -90,8 +103,10 @@ class RNN(object):
 
         # output layer, we just average over all the output
         # here the layer_input is with size (t, n, out_size)
-        layer_input = hidden_layer.activation  # output of the last lstm
-        self.h = layer_input
+        layer_input = hidden_layer.activation  # output of the last hidden state
+        # add by kalen
+        self.last_hidden = hidden_layer.activation
+
         layer_input = (layer_input * self.maskX[:, :, None]).sum(axis=0)
         layer_input = layer_input / self.maskX.sum(axis=0)[:, None]  # (n_samples, hidden_size)
 
@@ -109,13 +124,15 @@ class RNN(object):
         # y_pred = pred.argmax(axis=1)  # the predicted labels
 
         self.y = T.vector('y', dtype='int64')
-
-        cost = self.layers[-1].negative_log_likelihood(self.y)
+        L1_h = T.sum(abs(self.last_hidden))
+        L2_h = T.sqrt(T.sum(self.last_hidden**2))
+        #L2_h = T.sum(self.last_hidden ** 2)
+        cost = self.layers[-1].negative_log_likelihood(self.y) #+ 0.000001*L1_h
         error = self.layers[-1].errors(self.y)
 
         y_pred_prob = self.layers[-1].y_pred_prob
         y_pred = self.layers[-1].y_pred
-
+        first_hidden = self.layers[0].activation
         gparams = []
         for param in self.params:
             gparam = T.clip(T.grad(cost, param), -10, 10)
@@ -128,7 +145,7 @@ class RNN(object):
 
         self.train = theano.function(inputs=[self.X, self.maskX, self.y, lr],
                                      givens={self.use_noise: numpy.cast['int32'](1)},
-                                     outputs=[cost,self.h], updates=updates)
+                                     outputs=cost, updates=updates)
 
         self.pred_prob = theano.function(inputs=[self.X, self.maskX],
                                          givens={self.use_noise: numpy.cast['int32'](0)},
@@ -136,12 +153,19 @@ class RNN(object):
 
         self.pred = theano.function(inputs=[self.X, self.maskX],
                                     givens={self.use_noise: numpy.cast['int32'](0)},
-                                    outputs=y_pred)
+                                    outputs=[y_pred])
 
         self.error = theano.function(inputs=[self.X, self.maskX, self.y],
                                      givens={self.use_noise: numpy.cast['int32'](0)},
-                                     outputs=[error,self.h])
+                                     outputs=[error,self.last_hidden])
+        self.cacu_p_y_given_x = theano.function(inputs=[self.X,self.maskX],
+                                     givens={self.use_noise: numpy.cast['int32'](1)},
+                                     outputs=[self.last_hidden,first_hidden])
 
+    def showparam(self):
+        return self.params
+    def showlayer(self):
+        return self.layers
     def save_to_file(self, file_name, file_index=None):
         """
         This function stores the trained params to '*.h5' file

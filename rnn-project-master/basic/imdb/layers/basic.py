@@ -5,6 +5,7 @@ sys.path.append('..')
 from common.utils import *
 
 
+
 class BasicLayer(object):
     def __init__(self, rng, layer_id, shape, X, mask,
                  use_noise=1, p=0.5):
@@ -36,16 +37,26 @@ class BasicLayer(object):
         :param p: dropout ratio
         """
         prefix = 'Basic' + layer_id
-        self.in_size, self.hid_size = shape
+        self.in_size, self.hid_size,self.hid_pos_size = shape
 
         # weights for input
-        self.W = init_weights(shape=(self.in_size, self.hid_size),name=prefix + '#W')
+        self.W = init_weights(shape=(self.in_size, self.hid_size),
+                              name=prefix + '#W')
         # weights for hidden states
-        self.U = init_weights(shape=(self.hid_size, self.hid_size),name=prefix + '#U')
-        self.U_plus = init_weights(shape=(self.hid_size, 1),
+        self.U = init_weights(shape=(self.hid_size, self.hid_size),
                               name=prefix + '#U')
+
+        # weights for part hidden states
+
+
+        if self.hid_pos_size != self.hid_size:
+            self.U_LU = init_weights(shape=(self.hid_pos_size, self.hid_pos_size), name=prefix + '#ULU')
+            self.U_LD = init_weights(shape=(self.hid_pos_size,self.hid_size - self.hid_pos_size),name=prefix + '#URU')
+            self.U_RU = init_weights(shape=(self.hid_size-self.hid_pos_size,self.hid_pos_size),name=prefix + '#ULD')
+
         # bias
         self.b = init_bias(size=self.hid_size, name=prefix + '#b')
+
         self.X = X
         self.mask = mask
 
@@ -77,15 +88,29 @@ class BasicLayer(object):
             :type h_tm1: (n_samples, hid_size)
             :param h_tm1: hidden state at time (t - 1)
             """
-            preact = T.dot(x_t, T.nnet.sigmoid((self.W))) + T.dot(h_tm1, T.nnet.sigmoid(self.U)) + T.dot(h_tm1, -T.dot(T.nnet.sigmoid(self.U_plus), numpy.ones(shape=(1, self.hid_size)))) + self.b
-            h_t = T.nnet.relu(preact,alpha=0)
+            # h_t with size (n_samples, hid_size)
+
+            if self.hid_pos_size != self.hid_size:
+                h_pos = T.dot(h_tm1[:,0:self.hid_pos_size], self.U_LU) - T.dot(h_tm1[:,self.hid_pos_size:self.hid_size],T.nnet.relu(self.U_RU))
+                h_neg = T.dot(h_tm1[:,0:self.hid_pos_size],T.nnet.relu(self.U_LD))
+                preact = T.dot(x_t, self.W) + T.concatenate((h_pos, h_neg), axis=1) + self.b
+            else:
+                h_pos = T.dot(h_tm1, self.U)
+                preact = T.dot(x_t, self.W) + h_pos + self.b
+                print  self.hid_size,self.hid_pos_size
+            #`preact = T.dot(x_t, self.W) + T.dot(h_tm1, self.U) + self.b
+
+            h_t = T.nnet.relu(preact)
             # consider the mask
             h_t = m_t[:, None] * h_t + (1. - m_t)[:, None] * h_tm1
 
             return h_t
 
-        h, updates = theano.scan(fn=_step,sequences=[self.X, self.mask],outputs_info=[T.alloc(floatX(0.),n_samples,self.hid_size)])
-
+        h, updates = theano.scan(fn=_step,
+                                 sequences=[self.X, self.mask],
+                                 outputs_info=[T.alloc(floatX(0.),
+                                                       n_samples,
+                                                       self.hid_size)])
         # h here is of size (t, n_samples, hid_size)
         if p > 0:
             trng = RandomStreams(rng.randint(999999))
@@ -94,5 +119,9 @@ class BasicLayer(object):
             self.activation = T.switch(T.eq(use_noise, 1), h * drop_mask, h * (1 - p))
         else:
             self.activation = h
+        #self.params = [self.W, self.U, self.b]
 
-        self.params = [self.W, self.U, self.b,self.U_plus]
+        if self.hid_pos_size != self.hid_size:
+            self.params = [self.W, self.U_LD,self.U_LU,self.U_RU, self.b]
+        else:
+            self.params = [self.W,self.U,self.b]
